@@ -7,6 +7,7 @@ import sys
 
 import gradio as gr
 import nest_asyncio
+import requests
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from databricks.sdk import WorkspaceClient
@@ -80,24 +81,37 @@ Always use the tool — never make up weather data."""
 
         # Agentic loop: keep going until the LLM stops calling tools.
         for _ in range(5):
-            response = self.client.serving_endpoints.query(
-                name=self.model,
-                messages=messages,
-                tools=[WEATHER_TOOL],
-                tool_choice="auto",
-                max_tokens=1024,
+            response_raw = self.client.api_client.do(
+                "POST",
+                f"/serving-endpoints/{self.model}/invocations",
+                body={
+                    "messages": [
+                        {"role": m.role.value, "content": m.content}
+                        for m in messages
+                    ],
+                    "tools": [WEATHER_TOOL],
+                    "tool_choice": "auto",
+                    "max_tokens": 1024,
+                },
             )
 
-            message = response.choices[0].message
+            choice = response_raw["choices"][0]
+            message = choice["message"]
 
-            if not message.tool_calls:
-                return message.content
+            tool_calls = message.get("tool_calls")
+            if not tool_calls:
+                return message["content"]
 
-            messages.append(message)
+            messages.append(
+                ChatMessage(
+                    role=ChatMessageRole.ASSISTANT,
+                    content=message.get("content") or "",
+                )
+            )
 
-            for tool_call in message.tool_calls:
-                if tool_call.function.name == "get_weather":
-                    args = json.loads(tool_call.function.arguments)
+            for tool_call in tool_calls:
+                if tool_call["function"]["name"] == "get_weather":
+                    args = json.loads(tool_call["function"]["arguments"])
                     city = args.get("city", "").split(",")[0].strip()
                     weather_data = self.mcp_client.call(city)
 
@@ -105,7 +119,7 @@ Always use the tool — never make up weather data."""
                         ChatMessage(
                             role=ChatMessageRole.TOOL,
                             content=json.dumps(weather_data),
-                            tool_call_id=tool_call.id,
+                            tool_call_id=tool_call["id"],
                         )
                     )
 
