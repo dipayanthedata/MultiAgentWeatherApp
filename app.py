@@ -118,5 +118,5 @@ with gr.Blocks(title="Weather Query Agent") as demo:
     submit_btn.click(fn=orchestrator.ask, inputs=query_input, outputs=output)
     query_input.submit(fn=orchestrator.ask, inputs=query_input, outputs=output)
 
-if __name__ == "__main__":
-    demo.launch(server_port=8080, server_name="0.0.0.0")
+demo.launch(server_name="0.0.0.0", server_port=7860)
+app = demo.app
