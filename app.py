@@ -1,156 +1,119 @@
 """Weather Query Agent - Working Multi-Agent Version"""
 
-import ast
 import asyncio
 import json
-import re
-import subprocess
-import sys
+import os
 from pathlib import Path
-from typing import Dict
+import sys
 
 import gradio as gr
 import nest_asyncio
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from databricks.sdk import WorkspaceClient
+from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
 
 
 nest_asyncio.apply()
 
-class QueryParser:
-    """Agent 1: Parse natural language queries"""
-    def __init__(self):
-        pass
-    
-    def parse(self, query: str) -> Dict:
-        q = query.lower()
-        city = self._extract_city(query)
-        units = "celsius" if "celsius" in q or "°c" in q else "fahrenheit"
-        return {"city": city, "units": units}
+WEATHER_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": "Get current weather for any city worldwide using Open-Meteo API",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "city": {
+                    "type": "string",
+                    "description": "The city name to get weather for, e.g. 'San Jose' or 'Tokyo'",
+                }
+            },
+            "required": ["city"],
+        },
+    },
+}
 
-    def _extract_city(self, query: str) -> str | None:
-        patterns = [
-            r"(?:weather|temperature|temp|forecast|hot|cold|rainy|raining|snowing)\s+(?:in|at|for)\s+(.+)",
-            r"(?:in|at|for)\s+([A-Za-z .'-]+)",
-        ]
-        for pattern in patterns:
-            match = re.search(pattern, query, flags=re.IGNORECASE)
-            if match:
-                city = match.group(1)
-                city = re.sub(r"\b(in )?(celsius|fahrenheit|degrees?|today|now|please)\b", "", city, flags=re.IGNORECASE)
-                city = city.strip(" ?.!,")
-                return city.title() if city else None
-        return None
 
-class DataRetriever:
-    """Agent 2: Retrieve weather data"""
-    async def retrieve_async(self, parsed: Dict) -> Dict:
-        city = parsed["city"]
-        if not city:
-            return {"error": "City not found. Please include a city name in your question."}
-
+class MCPWeatherClient:
+    async def call_async(self, city: str) -> dict:
         server_path = Path(__file__).with_name("weather_mcp_server.py")
         server_params = StdioServerParameters(
             command=sys.executable,
             args=[str(server_path)],
         )
+        async with stdio_client(server_params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                result = await session.call_tool("get_weather", {"city": city})
+                content = getattr(result, "content", None)
+                if content and hasattr(content[0], "text"):
+                    return json.loads(content[0].text)
+                return {"error": "No result from MCP server"}
 
-        try:
-            async with stdio_client(server_params) as (read, write):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    result = await session.call_tool("get_weather", {"city": city})
-        except Exception as exc:
-            return {"error": f"MCP weather lookup failed: {exc}"}
-
-        data = self._parse_tool_result(result)
-        if "error" not in data and data.get("city"):
-            parsed["city"] = data["city"]
-        return data
-
-    def retrieve(self, parsed: Dict) -> Dict:
+    def call(self, city: str) -> dict:
         loop = asyncio.get_event_loop()
-        return loop.run_until_complete(self.retrieve_async(parsed))
+        return loop.run_until_complete(self.call_async(city))
 
-    def _parse_tool_result(self, result) -> Dict:
-        structured_content = getattr(result, "structuredContent", None)
-        if structured_content is None:
-            structured_content = getattr(result, "structured_content", None)
-        if isinstance(structured_content, dict):
-            return structured_content
 
-        content = getattr(result, "content", None)
-        if isinstance(content, list) and content:
-            first = content[0]
-            if isinstance(first, dict):
-                return first
-
-            text = getattr(first, "text", None)
-            if isinstance(text, str):
-                try:
-                    return json.loads(text)
-                except json.JSONDecodeError:
-                    try:
-                        parsed = ast.literal_eval(text)
-                    except (SyntaxError, ValueError):
-                        return {"error": text}
-                    if isinstance(parsed, dict):
-                        return parsed
-
-        if isinstance(result, dict):
-            return result
-
-        return {"error": "Unexpected MCP tool response."}
-
-class ResponseGenerator:
-    """Agent 3: Generate natural language responses"""
-    def generate(self, data: Dict, parsed: Dict) -> str:
-        if "error" in data:
-            return f"⚠️ {data['error']}"
-        
-        city = parsed["city"]
-        temp = data["temp_c"] if parsed["units"] == "celsius" else data["temp_f"]
-        unit = "°C" if parsed["units"] == "celsius" else "°F"
-        
-        condition_lower = data["condition"].lower()
-        if "sun" in condition_lower or "clear" in condition_lower:
-            emoji = "☀️"
-        elif "cloud" in condition_lower:
-            emoji = "☁️"
-        elif "rain" in condition_lower or "drizzle" in condition_lower:
-            emoji = "🌧️"
-        elif "storm" in condition_lower:
-            emoji = "⛈️"
-        elif "fog" in condition_lower:
-            emoji = "🌫️"
-        else:
-            emoji = "🌡️"
-        
-        return f"""{emoji} **Weather in {city}**
-
-• **Condition:** {data["condition"]}
-• **Temperature:** {temp}{unit}
-• **Humidity:** {data["humidity"]}%
-• **Wind:** {data["wind"]}
-
-*Multi-agent system: QueryParser → DataRetriever → ResponseGenerator*"""
-
-class Orchestrator:
-    """Coordinates all agents"""
+class AgentOrchestrator:
     def __init__(self):
-        self.parser = QueryParser()
-        self.retriever = DataRetriever()
-        self.generator = ResponseGenerator()
-    
+        self.client = WorkspaceClient()
+        self.mcp_client = MCPWeatherClient()
+        self.model = "databricks-meta-llama-3-3-70b-instruct"
+        self.system_prompt = """You are a helpful weather assistant.
+You have access to a get_weather tool that fetches real-time weather data for any city worldwide.
+When a user asks about weather, always use the tool to get current data before responding.
+After getting the weather data, provide a friendly, conversational response that includes:
+- Current conditions and temperature
+- Practical advice (what to wear, whether to carry an umbrella, etc.)
+- Any notable weather warnings if conditions are severe
+Always use the tool — never make up weather data."""
+
     def ask(self, query: str) -> str:
         if not query.strip():
             return "Please enter a weather question."
-        parsed = self.parser.parse(query)
-        data = self.retriever.retrieve(parsed)
-        return self.generator.generate(data, parsed)
+
+        messages = [
+            ChatMessage(role=ChatMessageRole.SYSTEM, content=self.system_prompt),
+            ChatMessage(role=ChatMessageRole.USER, content=query),
+        ]
+
+        # Agentic loop: keep going until the LLM stops calling tools.
+        for _ in range(5):
+            response = self.client.serving_endpoints.query(
+                name=self.model,
+                messages=messages,
+                tools=[WEATHER_TOOL],
+                tool_choice="auto",
+                max_tokens=1024,
+            )
+
+            message = response.choices[0].message
+
+            if not message.tool_calls:
+                return message.content
+
+            messages.append(message)
+
+            for tool_call in message.tool_calls:
+                if tool_call.function.name == "get_weather":
+                    args = json.loads(tool_call.function.arguments)
+                    city = args.get("city", "").split(",")[0].strip()
+                    weather_data = self.mcp_client.call(city)
+
+                    messages.append(
+                        ChatMessage(
+                            role=ChatMessageRole.TOOL,
+                            content=json.dumps(weather_data),
+                            tool_call_id=tool_call.id,
+                        )
+                    )
+
+        return "Sorry, I was unable to complete the weather lookup. Please try again."
 
 # Initialize
-orchestrator = Orchestrator()
+orchestrator = AgentOrchestrator()
 
 # Create UI using Blocks instead of ChatInterface to avoid schema bugs
 with gr.Blocks(title="Weather Query Agent") as demo:
@@ -183,9 +146,7 @@ with gr.Blocks(title="Weather Query Agent") as demo:
     submit_btn.click(fn=orchestrator.ask, inputs=query_input, outputs=output)
     query_input.submit(fn=orchestrator.ask, inputs=query_input, outputs=output)
 
-import os
-
 demo.launch(
     server_name="0.0.0.0",
-    server_port=int(os.getenv("DATABRICKS_APP_PORT", 8080)),
+    server_port=int(os.getenv("DATABRICKS_APP_PORT", 8080))
 )

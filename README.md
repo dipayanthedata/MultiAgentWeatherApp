@@ -7,13 +7,15 @@ A multi-agent AI app built on Databricks Apps that fetches real-time weather usi
 ```text
 User Query
     ↓
-QueryParser Agent        — extracts city name and preferred temperature unit
+AgentOrchestrator (LLM agent — Llama 3.3 70B via Databricks Foundation Model API)
+    ↓ tool_call: get_weather
+MCPWeatherClient (MCP stdio client)
     ↓
-DataRetriever Agent      — MCP client that calls weather_mcp_server.py
+weather_mcp_server.py (MCP server)
     ↓
-weather_mcp_server.py    — MCP server → Open-Meteo Geocoding + Forecast APIs
+Open-Meteo Geocoding + Forecast APIs
     ↓
-ResponseGenerator Agent  — formats the result into natural language
+LLM reasons over weather data → natural language response
     ↓
 Gradio UI
 ```
@@ -22,10 +24,10 @@ Gradio UI
 
 | File | Purpose | Notes |
 |---|---|---|
-| `app.py` | Gradio UI + agent orchestration + MCP client | Main entrypoint |
+| `app.py` | Gradio UI + `AgentOrchestrator` + `MCPWeatherClient` | Main entrypoint |
 | `weather_mcp_server.py` | MCP server wrapping Open-Meteo API | Spawned as subprocess |
-| `app.yaml` | Databricks Apps entrypoint config | Points to app.py |
-| `requirements.txt` | Python dependencies | gradio, mcp, httpx |
+| `app.yaml` | Databricks Apps entrypoint config | Points to `app.py` |
+| `requirements.txt` | Python dependencies | `gradio`, `mcp`, `httpx`, `nest_asyncio`, `databricks-sdk` |
 | `MCP_INTEGRATION_GUIDE.md` | MCP architecture detail | Transport: stdio |
 | `README.md` | This file | — |
 
@@ -55,7 +57,7 @@ Step 2:
 python app.py
 ```
 
-Step 3: Open `http://localhost:7860` in your browser.
+Step 3: Open `http://localhost:8080` in your browser.
 
 No API key or environment variable needed — Open-Meteo is free and open.
 

@@ -33,6 +33,9 @@ async def get_weather(city: str) -> dict[str, Any]:
     if not city or not city.strip():
         return {"error": "City is required."}
 
+    # Strip ", State" or ", Country" suffix if user passed "City, Region" format.
+    city = city.split(",")[0].strip()
+
     async with httpx.AsyncClient(timeout=20.0) as client:
         geocode_response = await client.get(
             "https://geocoding-api.open-meteo.com/v1/search",
