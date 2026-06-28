@@ -1,41 +1,126 @@
 """Weather Query Agent - Working Multi-Agent Version"""
 
+import ast
+import asyncio
+import json
 import re
+import subprocess
+import sys
+from pathlib import Path
 from typing import Dict
 
 import gradio as gr
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
 
-# Weather data
-WEATHER = {
-    "New York": {"temp_f": 72, "temp_c": 22, "condition": "Partly Cloudy", "humidity": 65, "wind": "8 mph NW"},
-    "Los Angeles": {"temp_f": 85, "temp_c": 29, "condition": "Sunny", "humidity": 45, "wind": "6 mph W"},
-    "Chicago": {"temp_f": 68, "temp_c": 20, "condition": "Cloudy", "humidity": 72, "wind": "12 mph NE"},
-    "Miami": {"temp_f": 88, "temp_c": 31, "condition": "Thunderstorms", "humidity": 78, "wind": "9 mph SE"},
-    "Seattle": {"temp_f": 62, "temp_c": 17, "condition": "Drizzle", "humidity": 85, "wind": "10 mph S"},
-    "San Francisco": {"temp_f": 65, "temp_c": 18, "condition": "Fog", "humidity": 75, "wind": "10 mph W"},
-    "London": {"temp_f": 58, "temp_c": 14, "condition": "Light Rain", "humidity": 80, "wind": "16 mph SW"},
-    "Tokyo": {"temp_f": 77, "temp_c": 25, "condition": "Clear", "humidity": 60, "wind": "6 mph E"}
+
+CITY_ALIASES = {
+    "new york": "New York",
+    "nyc": "New York",
+    "ny": "New York",
+    "los angeles": "Los Angeles",
+    "la": "Los Angeles",
+    "chicago": "Chicago",
+    "miami": "Miami",
+    "seattle": "Seattle",
+    "san francisco": "San Francisco",
+    "sf": "San Francisco",
+    "london": "London",
+    "tokyo": "Tokyo",
 }
 
 class QueryParser:
     """Agent 1: Parse natural language queries"""
     def __init__(self):
-        self.cities = {k.lower(): k for k in WEATHER.keys()}
-        self.cities.update({"nyc": "New York", "ny": "New York", "la": "Los Angeles", "sf": "San Francisco"})
+        self.cities = CITY_ALIASES
     
     def parse(self, query: str) -> Dict:
         q = query.lower()
-        city = next((v for k, v in self.cities.items() if k in q), None)
+        city = next(
+            (
+                v
+                for k, v in self.cities.items()
+                if re.search(rf"\b{re.escape(k)}\b", q)
+            ),
+            None,
+        )
+        if not city:
+            city = self._extract_city(query)
         units = "celsius" if "celsius" in q or "°c" in q else "fahrenheit"
         return {"city": city, "units": units}
 
+    def _extract_city(self, query: str) -> str | None:
+        patterns = [
+            r"(?:weather|temperature|temp|forecast|hot|cold|rainy|raining|snowing)\s+(?:in|at|for)\s+(.+)",
+            r"(?:in|at|for)\s+([A-Za-z .'-]+)",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, query, flags=re.IGNORECASE)
+            if match:
+                city = match.group(1)
+                city = re.sub(r"\b(in )?(celsius|fahrenheit|degrees?|today|now|please)\b", "", city, flags=re.IGNORECASE)
+                city = city.strip(" ?.!,")
+                return city.title() if city else None
+        return None
+
 class DataRetriever:
     """Agent 2: Retrieve weather data"""
-    def retrieve(self, parsed: Dict) -> Dict:
+    async def retrieve_async(self, parsed: Dict) -> Dict:
         city = parsed["city"]
-        if not city or city not in WEATHER:
-            return {"error": f"City not found. Available: {', '.join(list(WEATHER.keys())[:3])}..."}
-        return WEATHER[city]
+        if not city:
+            return {"error": "City not found. Please include a city name in your question."}
+
+        server_path = Path(__file__).with_name("weather_mcp_server.py")
+        server_params = StdioServerParameters(
+            command=sys.executable,
+            args=[str(server_path)],
+        )
+
+        try:
+            async with stdio_client(server_params) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    result = await session.call_tool("get_weather", {"city": city})
+        except Exception as exc:
+            return {"error": f"MCP weather lookup failed: {exc}"}
+
+        data = self._parse_tool_result(result)
+        if "error" not in data and data.get("city"):
+            parsed["city"] = data["city"]
+        return data
+
+    def retrieve(self, parsed: Dict) -> Dict:
+        return asyncio.run(self.retrieve_async(parsed))
+
+    def _parse_tool_result(self, result) -> Dict:
+        structured_content = getattr(result, "structuredContent", None)
+        if structured_content is None:
+            structured_content = getattr(result, "structured_content", None)
+        if isinstance(structured_content, dict):
+            return structured_content
+
+        content = getattr(result, "content", None)
+        if isinstance(content, list) and content:
+            first = content[0]
+            if isinstance(first, dict):
+                return first
+
+            text = getattr(first, "text", None)
+            if isinstance(text, str):
+                try:
+                    return json.loads(text)
+                except json.JSONDecodeError:
+                    try:
+                        parsed = ast.literal_eval(text)
+                    except (SyntaxError, ValueError):
+                        return {"error": text}
+                    if isinstance(parsed, dict):
+                        return parsed
+
+        if isinstance(result, dict):
+            return result
+
+        return {"error": "Unexpected MCP tool response."}
 
 class ResponseGenerator:
     """Agent 3: Generate natural language responses"""
