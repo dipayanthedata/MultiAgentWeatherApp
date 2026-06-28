@@ -10,42 +10,21 @@ from pathlib import Path
 from typing import Dict
 
 import gradio as gr
+import nest_asyncio
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 
-CITY_ALIASES = {
-    "new york": "New York",
-    "nyc": "New York",
-    "ny": "New York",
-    "los angeles": "Los Angeles",
-    "la": "Los Angeles",
-    "chicago": "Chicago",
-    "miami": "Miami",
-    "seattle": "Seattle",
-    "san francisco": "San Francisco",
-    "sf": "San Francisco",
-    "london": "London",
-    "tokyo": "Tokyo",
-}
+nest_asyncio.apply()
 
 class QueryParser:
     """Agent 1: Parse natural language queries"""
     def __init__(self):
-        self.cities = CITY_ALIASES
+        pass
     
     def parse(self, query: str) -> Dict:
         q = query.lower()
-        city = next(
-            (
-                v
-                for k, v in self.cities.items()
-                if re.search(rf"\b{re.escape(k)}\b", q)
-            ),
-            None,
-        )
-        if not city:
-            city = self._extract_city(query)
+        city = self._extract_city(query)
         units = "celsius" if "celsius" in q or "°c" in q else "fahrenheit"
         return {"city": city, "units": units}
 
@@ -90,7 +69,8 @@ class DataRetriever:
         return data
 
     def retrieve(self, parsed: Dict) -> Dict:
-        return asyncio.run(self.retrieve_async(parsed))
+        loop = asyncio.get_event_loop()
+        return loop.run_until_complete(self.retrieve_async(parsed))
 
     def _parse_tool_result(self, result) -> Dict:
         structured_content = getattr(result, "structuredContent", None)
@@ -175,7 +155,7 @@ orchestrator = Orchestrator()
 # Create UI using Blocks instead of ChatInterface to avoid schema bugs
 with gr.Blocks(title="Weather Query Agent") as demo:
     gr.Markdown("# 🌤️ Weather Query Agent")
-    gr.Markdown("Multi-agent system for natural language weather queries. Ask about: New York, LA, Chicago, Miami, Seattle, SF, London, Tokyo")
+    gr.Markdown("Multi-agent system for natural language weather queries. Ask about any city worldwide — powered by Open-Meteo")
     
     with gr.Row():
         with gr.Column():
