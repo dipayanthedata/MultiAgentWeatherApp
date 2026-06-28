@@ -11,7 +11,6 @@ import requests
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from databricks.sdk import WorkspaceClient
-from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
 
 
 nest_asyncio.apply()
@@ -75,8 +74,8 @@ Always use the tool — never make up weather data."""
             return "Please enter a weather question."
 
         messages = [
-            ChatMessage(role=ChatMessageRole.SYSTEM, content=self.system_prompt),
-            ChatMessage(role=ChatMessageRole.USER, content=query),
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": query},
         ]
 
         # Agentic loop: keep going until the LLM stops calling tools.
@@ -85,10 +84,7 @@ Always use the tool — never make up weather data."""
                 "POST",
                 f"/serving-endpoints/{self.model}/invocations",
                 body={
-                    "messages": [
-                        {"role": m.role.value, "content": m.content}
-                        for m in messages
-                    ],
+                    "messages": messages,
                     "tools": [WEATHER_TOOL],
                     "tool_choice": "auto",
                     "max_tokens": 1024,
@@ -103,10 +99,11 @@ Always use the tool — never make up weather data."""
                 return message["content"]
 
             messages.append(
-                ChatMessage(
-                    role=ChatMessageRole.ASSISTANT,
-                    content=message.get("content") or "",
-                )
+                {
+                    "role": "assistant",
+                    "content": message.get("content") or "",
+                    "tool_calls": tool_calls,
+                }
             )
 
             for tool_call in tool_calls:
@@ -116,11 +113,11 @@ Always use the tool — never make up weather data."""
                     weather_data = self.mcp_client.call(city)
 
                     messages.append(
-                        ChatMessage(
-                            role=ChatMessageRole.TOOL,
-                            content=json.dumps(weather_data),
-                            tool_call_id=tool_call["id"],
-                        )
+                        {
+                            "role": "tool",
+                            "content": json.dumps(weather_data),
+                            "tool_call_id": tool_call["id"],
+                        }
                     )
 
         return "Sorry, I was unable to complete the weather lookup. Please try again."
