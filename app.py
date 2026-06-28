@@ -184,4 +184,3 @@ with gr.Blocks(title="Weather Query Agent") as demo:
     query_input.submit(fn=orchestrator.ask, inputs=query_input, outputs=output)
 
 demo.launch(server_name="0.0.0.0", server_port=8080)
-app = demo.app
