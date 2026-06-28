@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import os
 from pathlib import Path
 import sys
 
@@ -146,7 +145,4 @@ with gr.Blocks(title="Weather Query Agent") as demo:
     submit_btn.click(fn=orchestrator.ask, inputs=query_input, outputs=output)
     query_input.submit(fn=orchestrator.ask, inputs=query_input, outputs=output)
 
-demo.launch(
-    server_name="0.0.0.0",
-    server_port=int(os.getenv("DATABRICKS_APP_PORT", 8080))
-)
+demo.launch()
